@@ -142,18 +142,18 @@ else:
 
 dataroot = 'tasks/mnist/data'
 if args.fashion:
-    mnist_dataset_train = FashionMNIST_CL(dataroot, download=False, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
-    mnist_dataset_test = FashionMNIST_CL(dataroot, download=False, train=False, output_size=args.output_size)
+    mnist_dataset_train = FashionMNIST_CL(dataroot, download=True, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
+    mnist_dataset_test = FashionMNIST_CL(dataroot, download=True, train=False, output_size=args.output_size)
 elif args.cifar:
-    mnist_dataset_train = CIFAR10_CL(dataroot, download=False, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
-    mnist_dataset_test = CIFAR10_CL(dataroot, download=False, train=False, output_size=args.output_size)
+    mnist_dataset_train = CIFAR10_CL(dataroot, download=True, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
+    mnist_dataset_test = CIFAR10_CL(dataroot, download=True, train=False, output_size=args.output_size)
 elif args.devanagari:
     dev_cl = Devanagari_CL(args.batch_size, 'tasks/mnist/data/Devanagari_CL')
     mnist_dataset_train_all = dev_cl.get_subtasks(True, args.tasks)
     mnist_dataset_test_all = dev_cl.get_subtasks(False, args.tasks)
 else:
-    mnist_dataset_train = MNIST_CL(dataroot, download=False, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
-    mnist_dataset_test = MNIST_CL(dataroot, download=False, train=False, output_size=args.output_size)
+    mnist_dataset_train = MNIST_CL(dataroot, download=True, train=True, perc_val=0.25, batch_size=args.batch_size, output_size=args.output_size)
+    mnist_dataset_test = MNIST_CL(dataroot, download=True, train=False, output_size=args.output_size)
 
 
 
