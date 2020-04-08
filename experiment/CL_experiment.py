@@ -6,8 +6,7 @@ from core.BaselineRNN import BaselineRNN
 from core.LMN import LMN
 from core.AugmentedLMN import AugmentedLMN
 from core.AugmentedLSTM import AugmentedLSTM
-# from core.LSTMAutoencoder import LSTMAutoencoder
-from core.LSTMAutoencoder2 import LSTMAutoencoder
+from core.LSTMAutoencoder import LSTMAutoencoder
 from torch.nn.modules.loss import _Loss
 
 class CL_Experiment():

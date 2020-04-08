@@ -25,6 +25,21 @@ label_conversion = {4: 0, 6: 1, 10: 2, 525: 3, 14: 4, 15: 5, 17: 6, 18: 7, 21: 8
 
 path_save_autoencoders = 'saved_models/audioset/'
 
+def MSEMasked(input, target, masks=None):
+
+    input = torch.sigmoid(input)
+    
+    pointwise_loss = (input - target)**2
+
+    if masks is not None:
+        pointwise_loss = pointwise_loss * masks
+        loss = torch.sum(pointwise_loss) / float(torch.nonzero(masks).size(0))
+    else:
+        loss = torch.sum(pointwise_loss) / float(reduce( lambda a,b: a*b, list(target.size()) ))
+        
+    return loss
+
+    
 def load_unbal_data(filename, tasks, block_size):
     gen = generator_audioset(filename, block_size=block_size)
 
