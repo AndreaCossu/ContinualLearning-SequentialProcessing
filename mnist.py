@@ -8,10 +8,7 @@ import torch
 import argparse
 import pickle
 import os
-from sklearn.model_selection import train_test_split
 import numpy as np
-from torch.utils.data import DataLoader, SubsetRandomSampler, BatchSampler
-from torchvision import datasets, transforms
 
 from tasks.dataset_cl import MNIST_CL, FashionMNIST_CL, CIFAR10_CL, Devanagari_CL
 
@@ -71,7 +68,7 @@ parser.add_argument('--load', action="store_true", help='load models')
 
 
 parser.add_argument('--cuda', action="store_true", help='use gpu')
-parser.add_argument('--plot_folder', type=str, default='plots/mnist/single/', help='folder in which to put saved plots. Created if not existing.')
+parser.add_argument('--plot_folder', type=str, default='plots/test/', help='folder in which to put saved plots. Created if not existing.')
 
 args = parser.parse_args()
 ################################### Init params and folders
@@ -136,7 +133,6 @@ if args.tenclasses:
     tt = [list(range(10))]
 else:
     tt = [[0,1],[2,3],[4,5],[6,7],[8,9]]
-
 
 
 
