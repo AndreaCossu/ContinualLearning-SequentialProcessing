@@ -1,29 +1,133 @@
-import random
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
-from tasks.audioset.preprocess import generator_audioset, select_category
-from collections import defaultdict
+import os
+import numpy as np
+from functools import reduce
+from torch.nn.modules.loss import _Loss
 
 
-'''
-label_conversion = {}
-target = 0
-for el in filtered_eval:
-    label_conversion[el] = target
-    target = (target + 1) % 10
-'''
-label_conversion = {4: 0, 6: 1, 10: 2, 525: 3, 14: 4, 15: 5, 17: 6, 18: 7, 21: 8, 23: 9, 
-24: 0, 25: 1, 33: 2, 34: 3, 38: 4, 43: 5, 45: 6, 49: 7, 53: 8, 54: 9,
-56: 0, 58: 1, 59: 2, 60: 3, 62: 4, 63: 5, 67: 6, 70: 7, 77: 8, 79: 9,
-82: 0, 92: 1, 94: 2, 96: 3, 105: 4, 149: 5, 174: 6, 182: 7, 183: 8, 184: 9,
-198: 0, 201: 1, 203: 2, 207: 3, 209: 4, 211: 5, 215: 6, 292: 7, 309: 8, 312: 9,
-317: 0, 318: 1, 327: 2, 339: 3, 342: 4, 346: 5, 347: 6, 348: 7, 361: 8, 367: 9,
-368: 0, 369: 1, 377: 2, 382: 3, 386: 4, 387: 5, 390: 6, 391: 7, 398: 8, 400: 9,
-403: 0, 407: 1, 411: 2, 414: 3, 415: 4, 419: 5, 421: 6, 442: 7, 450: 8, 452: 9,
-453: 0, 454: 1, 467: 2, 468: 3, 469: 4, 470: 5, 471: 6, 481: 7, 483: 8, 493: 9, 
-498: 0, 500: 1}
+save_test_results = 'test_perf.txt'
+path_save_models = 'saved_models'
 
-path_save_autoencoders = 'saved_models/audioset/'
+class OrthogonalLoss(_Loss):
+    '''
+    Loss that adds to the classic BCE a penalty term
+    in order to have orthogonal memory matrix
+    '''
+
+    def __init__(self, criterion, memory, device, lamb=0.1, beta=0., model='lmn'):
+        
+        '''
+        :param model: string representing the model
+        :param criterion: main loss to be used
+        :param memory: the Memory class of the (A)LMN currently in use
+        :param lamb: hyperparameter to control orthogonalization
+        :param beta: hyperparameter to control hidden state norm
+        '''
+
+        super(OrthogonalLoss, self).__init__(None, None, 'mean')
+
+        self.device = device
+        self.model = model
+        self.memory = memory
+        self.lamb = lamb
+        self.beta = beta
+        self.criterion = criterion
+
+    def update_memory(self, memory):
+        '''
+        Update memory, in case new modules are added to the ALMN or ALSTM
+        '''
+
+        self.memory = memory
+
+    def forward(self, input, target, hs=None):
+        '''
+        :param hs: (B, 2*L-1, H) hidden states for each batch and for each sequence item
+        '''
+
+        loss = self.criterion(input, target)
+
+
+        if hs is not None:
+            batch_losses = loss.mean(dim=2).mean(dim=1)
+            T = hs.size(1)
+            h_norms = torch.norm(hs, dim=2, p=2) # (B, 2*L-1) norms
+
+            norms_sum = (h_norms[:, 1:] - h_norms[:, :-1])**2
+
+            norms_penalty = self.beta * (torch.sum(norms_sum, dim=1) / float(T))
+
+        if self.model.endswith('lmn'):
+            orth_penalty = self.lamb * torch.norm(
+                torch.matmul(self.memory.linear_memory.weight, self.memory.linear_memory.weight.transpose(0,1)) -
+                torch.eye(self.memory.linear_memory.weight.size(0) , device=self.device)
+                )**2
+        elif self.model == 'rnn' or self.model == 'lstm' or self.model == 'alstm':
+            orth_penalty = self.lamb * torch.norm(
+                torch.matmul(self.memory.all_weights[0][1], self.memory.all_weights[0][1].transpose(0,1)) -
+                torch.eye(self.memory.all_weights[0][1].size(0) , device=self.device)
+                )**2   
+
+        if hs is None:
+            total_loss = loss.mean() +  orth_penalty
+        else:
+            total_loss = (batch_losses + norms_penalty).mean() + orth_penalty
+
+        return total_loss
+
+
+
+def monitor_orthogonality(args, writer, task_id, epoch, train_models):
+    with torch.no_grad():
+        for model in args.models:
+
+            if model == 'almn':
+                memory_matrix = train_models[model][0].lmns[-1].memory.linear_memory.weight
+            elif model == 'lmn':
+                memory_matrix = train_models[model][0].memory.linear_memory.weight
+            elif model == 'rnn' or model == 'lstm':
+                memory_matrix = train_models[model][0].rnn_module.all_weights[0][1]
+            elif model == 'alstm':
+                memory_matrix = train_models[model][0].lstms[-1].lstm.all_weights[0][1]
+
+            visualize = torch.matmul(memory_matrix.transpose(0,1), memory_matrix).cpu()
+            writer.add_image(model+"_memory/"+str(task_id), visualize, epoch, dataformats='HW')
+
+
+
+def save_model(model, modelname, path):
+    if modelname == 'alstm' or modelname == 'almn':
+        model.save_augmented(path)
+    else:
+        torch.save(model.state_dict(), os.path.join(path, modelname+'.pt'))
+
+def load_models(model, modelname, path, device):
+    check = torch.load(os.path.join(path,modelname+'.pt'), map_location=device)
+
+    if modelname == 'alstm' or modelname == 'almn':
+        model[0].load_augmented(path, device)
+    else:
+        model[0].load_state_dict(check)
+
+    model[0].eval()
+
+    return model
+
+def save_autoencoders(autoencoders, path):
+
+    for i,ae in enumerate(autoencoders):
+        torch.save(ae.state_dict(), os.path.join(path,'ae_'+str(i)+'.pt'))
+
+def load_autoencoders(autoencoders, device, path):
+    for i in range(len(autoencoders)):
+        check = torch.load(os.path.join(path,'ae_'+str(i)+'.pt'), map_location=device)
+        autoencoders[i].load_state_dict(check)
+        autoencoders[i].eval()
+
+    return autoencoders
 
 def MSEMasked(input, target, masks=None):
 
@@ -39,290 +143,113 @@ def MSEMasked(input, target, masks=None):
         
     return loss
 
-    
-def load_unbal_data(filename, tasks, block_size):
-    gen = generator_audioset(filename, block_size=block_size)
 
-    xs = defaultdict(list)
-    ys = defaultdict(list)
-
-    for x, y, _ in gen:
-        for i, task in enumerate(tasks):
-            idx = select_category(task, y, one_category=True)
-            if idx is not None:
-                x_task, y_task = x[idx], y[idx]
-                y_task = transform_labels(y_task, module=False)
-                xs[i].append(x_task)
-                ys[i].append(y_task)
-
-
-    for k in xs.keys():
-        xs[k] = torch.cat(xs[k])
-        ys[k] = torch.cat(ys[k])
-
-    return xs, ys
-
-
-def split_audioset(x,y,test_size=0.2):
-    random_idx = list(range(x.size(0)))
-    random.shuffle(random_idx)
-    x_shuffled, y_shuffled = x[random_idx], y[random_idx]
-    end = int(x.size(0) * test_size)
-    x_train, x_val, y_train, y_val = x_shuffled[end:], x_shuffled[:end], y_shuffled[end:], y_shuffled[:end]
-
-    return x_train, x_val, y_train, y_val
-
-def random_segments(x,y, batch_size):
-    random_idx = list(range(x.size(0)))
-    random.shuffle(random_idx)
-    random_idx = random_idx[:batch_size]
-
-    return x[random_idx], y[random_idx]
-
-def accuracy(output, target):
-    probs = torch.nn.functional.softmax(output, dim=1)
-    winners = probs.argmax(dim=1)
-
-    acc = (winners == target).sum().float() / target.size(0)
-
-    return acc.item()
-
-def transform_labels(y, module=True, formatted=False):
+def monitor(writer, value, name, t):
     '''
-    y: (B, n_classes)
+    Write to tensorboardX a single scalar value
+    '''
+    writer.add_scalar(name, value.item(), t)
 
-    It assumes one 1 for each row
+
+def configure_plots(folder):
+    '''
+    Set plot folder to folder by creating it if it does not exist.
     '''
 
-    if not formatted:
-        y = y.nonzero()[:,1].long()
+    default="plots/"
 
-    if not module:
-        return y
-        
-    # convert labels in [0, 9]
-    for i in range(y.size(0)):
-        y[i] = label_conversion[ y[i].item() ]
+    if not os.path.isdir(os.path.join(folder, path_save_models)):
+        try:
+            os.makedirs(os.path.join(folder, path_save_models))
+        except OSError:
+            print("Error when creating experiment folder")
+            folder = default
 
-    return y
+    if folder[-1] != '/':
+        folder += '/'
 
-def train(train_models, modelname, x, y, acc_f, device, output_size, max_grad_norm=5.0):
+    return folder
 
-    x = x.to(device)
-    y = y.to(device)
+def write_test_results(plot_folder, accs, losses, res=None, module_acc=None):
 
-    model = train_models[modelname][0]
-    optimizer = train_models[modelname][1]
-    criterion = train_models[modelname][2]
+    with open(os.path.join(plot_folder, 'loss_'+save_test_results), 'w') as f:
+        for model, loss in losses.items():
+            for t, l in enumerate(loss):
+                f.write(str(t+1) + ',' + model + ',' + str(l) + '\n')
 
-    model.train()
+    with open(os.path.join(plot_folder, 'acc_'+save_test_results), 'w') as f:
+        for model, acc in accs.items():
+            for t, a in enumerate(acc):
+                f.write(str(t+1) + ',' + model + ',' + str(a) + '\n')
 
-    optimizer.zero_grad()
+    if res is not None:
+        with open(os.path.join(plot_folder, 'autoencoders_'+save_test_results), 'w') as f:
+            for t, re in enumerate(res):
+                for ae_id, ae_re in enumerate(re):
+                    f.write(str(t+1) + ',' + str(ae_id+1) + ',' + str(ae_re) + '\n')
 
-    if modelname=='lstm' or modelname=='rnn' or modelname=='alstm' or modelname=='lstm_sep':
+    if module_acc is not None:
+        np.savetxt(os.path.join(plot_folder, 'module_acc_'+save_test_results), module_acc, delimiter=',', fmt='%.2f') 
 
-        h = model.reset_memory_state()
+def write_intermediate_test_results(plot_folder, accs, losses):
+    with open(os.path.join(plot_folder, 'intermediate_loss_'+save_test_results), 'w') as f:
+        for model, loss in losses.items():
+            for t, l in loss.items():
+                f.write(str(t) + ',' + model + ',' + str(l) + '\n')
 
-        h, predictions = model(x, h)
+    with open(os.path.join(plot_folder, 'intermediate_acc_'+save_test_results), 'w') as f:
+        for model, acc in accs.items():
+            for t, a in acc.items():
+                f.write(str(t) + ',' + model + ',' + str(a) + '\n')
 
-        predictions = predictions[:, -1, :]
 
-        loss = criterion(predictions, y)
+def write_configuration(args, dest):
+    '''
+    Write the input argument passed to the script to a file
+    '''
 
-        loss.backward()
+    args_d = vars(args)
+    with open(os.path.join(dest, 'conf.txt'), 'w') as f:
+        for k, v in args_d.items():
+            f.write(str(k) + ": " + str(v)+"\n")
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+def print_num_parameters(args, train_models):
+    '''
+    Print the number of parameters of the models
+    '''
 
-        optimizer.step()
+    for model in args.models:
+        print(model , ': ', len(list(train_models[model][0].parameters())))
+        par = 0
+        for param in train_models[model][0].parameters():
+            curr = 1
+            for i in range(len(param.size())):
+                curr *= param.size(i)
+            par += curr
+        print(par)
 
-    else: # lmn, almn, lmn_sep
 
-        h = model.reset_memory_state()
 
-        predictions = torch.empty(x.size(0), x.size(1), output_size, requires_grad=False, device=device).float()
+def get_colors(n):
+    return plt.cm.get_cmap('hsv', n)
 
-        for i in range(x.size(1)):
-            h, predictions[:, i, :] = model(x[:, i, :], h)
+def plot(args, v1, model, type, v2=None):
 
-        predictions = predictions[:, -1, :]
+    tasks, plot_folder, epochs = args[0], args[1], args[2]
 
-        loss = criterion(predictions, y)
+    colors = get_colors(len(v1)*3)
 
-        loss.backward()
+    plt.figure()
+    plt.title(model+'_'+type+'-'+str(epochs))
+    for task in range(len(v1)):
+        task_vals = v1[task]
+        plt.plot(range(len(task_vals)), task_vals, color=colors(task*3), label=model+'-'+str(tasks[task]))
+        if v2 is not None:
+            test_task_vals = v2[task]
+            plt.plot( range(len(test_task_vals)), test_task_vals, ls='--', color=colors(task*3))
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+    plt.legend(loc='best')
 
-        optimizer.step()
 
-    with torch.no_grad():
-        acc = acc_f(predictions, y)
+    plt.savefig(os.path.join(plot_folder, model+'_'+type+'.png'))
 
-
-    return loss.item(), acc
-
-
-def test(train_models, modelname, x,y, acc_f, device, output_size, module_id=None):
-
-    x = x.to(device)
-    y = y.to(device)
-
-    with torch.no_grad():
-        model = train_models[modelname][0]
-
-        model.eval()
-
-        if modelname=='lstm' or modelname=='rnn' or modelname=='alstm' or modelname=='lstm_sep':
-
-            if modelname == 'alstm':
-                h = model.reset_memory_state(batch_size=x.size(0), module_id=module_id)
-                h, predictions = model(x, h, task_id=module_id)
-            else:
-                h = model.reset_memory_state(batch_size=x.size(0))
-                h, predictions = model(x, h)
-
-        else: # lmn, almn, lmn_sep
-
-            predictions = torch.empty(x.size(0), x.size(1), output_size, requires_grad=False, device=device).float()
-
-            if modelname=='almn':
-                h = model.reset_memory_state(batch_size=x.size(0), module_id=module_id)
-                for i in range(x.size(1)):
-                    h, predictions[:, i, :] = model(x[:, i, :], h, task_id=module_id)
-            else:
-                h = model.reset_memory_state(batch_size=x.size(0))
-                for i in range(x.size(1)):
-                    h, predictions[:, i, :] = model(x[:, i, :], h)
-
-        predictions = predictions[:, -1, :]
-
-        loss = F.cross_entropy(predictions, y, reduction='mean')
-
-        acc = acc_f(predictions, y)
-
-        return acc, loss.item()
-
-def train_autoencoder(ae, optimizer, x, reconstruction_loss, device):
-
-    x = x.to(device)
-
-    ae.train()
-
-    optimizer.zero_grad()
-
-    h_ae = ae.reset_hidden(batch_size=x.size(0))
-    out, _ = ae(x,h_ae)
-
-    re = reconstruction_loss(out,x)
-
-    re.backward()
-
-    optimizer.step()
-
-    return re.item()
-
-def test_autoencoder(train_autoencoders, x, reconstruction_loss, device, small_version):
-
-    x = x.to(device)
-
-    with torch.no_grad():
-
-        autoencoders = train_autoencoders[0]
-
-        reconstruction_errors = []
-
-        for id, ae in enumerate(autoencoders):
-
-            if not small_version and id == 0:
-                reconstruction_errors.append(1000)
-                continue
-
-            ae.eval()
-            h_ae = ae.reset_hidden(batch_size=x.size(0))
-            out, _ = ae(x,h_ae)
-            re = reconstruction_loss(out,x)
-
-            reconstruction_errors.append(re.item())
-
-        module_id = reconstruction_errors.index(min(reconstruction_errors))
-
-    return reconstruction_errors, module_id
-
-
-def train_ewc(ewc, cat_id_p, train_models, modelname, x,y, acc_f, device, output_size, max_grad_norm=5.0):
-    x = x.to(device)
-    y = y.to(device)
-
-    model = train_models[modelname][0]
-    optimizer = train_models[modelname][1]
-    criterion = train_models[modelname][2]
-
-    model.train()
-
-    optimizer.zero_grad()
-
-    if modelname=='lstm' or modelname=='rnn' or modelname=='alstm' or modelname=='lstm_sep':
-
-        h = model.reset_memory_state()
-
-        h, predictions = model(x, h)
-
-
-    else: # lmn, almn, lmn_sep
-
-        h = model.reset_memory_state()
-
-        predictions = torch.empty(x.size(0), x.size(1), output_size, requires_grad=False, device=device).float()
-
-        for i in range(x.size(1)):
-            h, predictions[:, i, :] = model(x[:, i, :], h)
-
-    predictions = predictions[:, -1, :]
-
-    loss = criterion(predictions, y)
-
-    loss_out = loss.item()
-
-    loss += ewc.ewc_penalty(model, modelname, cat_id_p)
-
-    loss.backward()
-
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-    optimizer.step()
-
-    with torch.no_grad():
-        acc = acc_f(predictions, y)
-
-
-    return loss_out, acc
-
-def accumulate_backward(train_models, modelname, x, y, device, output_size, max_grad_norm=5.0):
-
-    model = train_models[modelname][0]
-    optimizer = train_models[modelname][1]
-    criterion = train_models[modelname][2]
-
-    model.train()
-
-    optimizer.zero_grad()
-
-    h = model.reset_memory_state(batch_size=x.size(0))
-
-    if modelname=='lstm' or modelname=='rnn' or modelname=='alstm' or modelname=='lstm_sep':
-
-
-        h, predictions = model(x, h)
-
-
-    else: # lmn, almn, lmn_sep
-
-        predictions = torch.empty(x.size(0), x.size(1), output_size, requires_grad=False, device=device).float()
-
-        for i in range(x.size(1)):
-            h, predictions[:, i, :] = model(x[:, i, :], h)
-
-    predictions = predictions[:, -1, :]
-
-    loss = criterion(predictions, y)
-
-    loss.backward()
