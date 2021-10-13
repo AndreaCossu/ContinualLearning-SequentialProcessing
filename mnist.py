@@ -11,7 +11,7 @@ import os
 import numpy as np
 
 from tasks.dataset_cl import MNIST_CL, FashionMNIST_CL, CIFAR10_CL, Devanagari_CL
-
+from torch.utils.data import DataLoader
 from core.EWC_wrapper import EWC
 from tasks.mnist.utils_single import *
 from tasks.utils import *
